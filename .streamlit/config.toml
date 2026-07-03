@@ -1,0 +1,16 @@
+# ============================================================
+# Tema visual de la app (NO toca la lógica / backend).
+# Colócalo en el repositorio dentro de una carpeta llamada  .streamlit/
+# es decir, la ruta debe ser:   .streamlit/config.toml
+# Streamlit lo aplica automáticamente al desplegar.
+# ============================================================
+[theme]
+base = "light"
+primaryColor = "#e63946"            # rojo coral (acentos, botones, sliders)
+backgroundColor = "#f8f9fb"         # fondo general suave
+secondaryBackgroundColor = "#ffffff" # tarjetas, sidebar
+textColor = "#1d3557"               # azul oscuro para el texto
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"             # oculta el menú de desarrollador, más limpio
