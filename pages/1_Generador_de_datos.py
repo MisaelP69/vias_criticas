@@ -1,10 +1,12 @@
 # ============================================================
 # PÁGINA 2: Generador de datos simulados (parametrizable).
 # COLOCA ESTE ARCHIVO DENTRO DE UNA CARPETA LLAMADA  pages/
-# es decir, en el repositorio la ruta debe ser:  pages/1_Generador_de_datos.py
-# Streamlit lo mostrará automáticamente en el menú lateral, como segunda
-# página junto a la principal (app.py). Usa claves de session_state propias
-# ("gen") que no chocan con las de la app de análisis ("R").
+# Ruta en el repositorio:  pages/1_Generador_de_datos.py
+#
+# Novedad: la CIUDAD es una lista desplegable buscable; al elegirla,
+# se consultan en OpenStreetMap los BARRIOS y las VÍAS principales reales
+# de esa ciudad, que se ofrecen como listas desplegables de selección
+# múltiple. Todo cacheado por ciudad.
 # ============================================================
 import datetime as dt
 import numpy as np
@@ -14,14 +16,70 @@ import plotly.express as px
 
 st.set_page_config(page_title="Generador de datos", page_icon="🧪", layout="wide")
 st.title("🧪 Generador de accidentes simulados")
-st.caption("Configura todo a tu gusto y descarga un CSV listo para la página de análisis.")
+st.caption("Elige la ciudad y sus barrios/vías (reales, desde OpenStreetMap) y descarga un CSV "
+           "listo para la página de análisis.")
+
+# Ciudades frecuentes (puedes elegir «Otra ciudad…» para escribir cualquiera de OSM)
+CIUDADES = [
+    "Acacías, Meta, Colombia", "Villavicencio, Meta, Colombia", "Granada, Meta, Colombia",
+    "Montería, Córdoba, Colombia", "Cereté, Córdoba, Colombia", "Lorica, Córdoba, Colombia",
+    "Bogotá, Colombia", "Medellín, Antioquia, Colombia", "Cali, Valle del Cauca, Colombia",
+    "Barranquilla, Atlántico, Colombia", "Cartagena, Bolívar, Colombia", "Cúcuta, Norte de Santander, Colombia",
+    "Bucaramanga, Santander, Colombia", "Pereira, Risaralda, Colombia", "Santa Marta, Magdalena, Colombia",
+    "Ibagué, Tolima, Colombia", "Manizales, Caldas, Colombia", "Neiva, Huila, Colombia",
+    "Pasto, Nariño, Colombia", "Armenia, Quindío, Colombia", "Sincelejo, Sucre, Colombia",
+    "Popayán, Cauca, Colombia", "Valledupar, Cesar, Colombia", "Tunja, Boyacá, Colombia",
+    "Yopal, Casanare, Colombia", "Girardot, Cundinamarca, Colombia", "Palmira, Valle del Cauca, Colombia",
+    "Otra ciudad (escribir)…",
+]
+
+# ------------------------------------------------------------
+# Consultas a OpenStreetMap (cacheadas por ciudad)
+# ------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def osm_barrios(ciudad):
+    import osmnx as ox
+    try:
+        g = ox.features_from_place(ciudad, tags={"place": ["suburb", "neighbourhood", "quarter", "borough"]})
+        nombres = sorted({str(n).upper() for n in g.get("name", pd.Series(dtype=str)).dropna()})
+        return nombres
+    except Exception:
+        return []
+
+@st.cache_data(show_spinner=False)
+def osm_vias(ciudad):
+    import osmnx as ox
+    try:
+        g = ox.features_from_place(ciudad, tags={"highway": ["motorway", "trunk", "primary", "secondary"]})
+        nombres = sorted({str(n).upper() for n in g.get("name", pd.Series(dtype=str)).dropna()})
+        return nombres
+    except Exception:
+        return []
 
 # ------------------------------------------------------------
 # CONTROLES
 # ------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Parámetros")
-    ciudad = st.text_input("Ciudad (solo para el nombre del archivo)", "Montería, Córdoba, Colombia")
+    sel = st.selectbox("Ciudad (escribe para buscar)", CIUDADES, index=3)
+    if sel == "Otra ciudad (escribir)…":
+        ciudad = st.text_input("Escribe la ciudad como en OpenStreetMap",
+                               "Montería, Córdoba, Colombia")
+    else:
+        ciudad = sel
+
+    cargar = st.button("🔎 Consultar barrios y vías de la ciudad")
+    if cargar:
+        with st.spinner(f"Consultando OpenStreetMap para «{ciudad}»…"):
+            st.session_state["barrios_ciudad"] = osm_barrios(ciudad)
+            st.session_state["vias_ciudad"] = osm_vias(ciudad)
+            st.session_state["ciudad_cargada"] = ciudad
+
+    barrios_disp = st.session_state.get("barrios_ciudad", [])
+    vias_disp = st.session_state.get("vias_ciudad", [])
+    if st.session_state.get("ciudad_cargada") == ciudad and (barrios_disp or vias_disp):
+        st.success(f"OSM: {len(barrios_disp)} barrios · {len(vias_disp)} vías encontradas")
+
     n_total = st.number_input("Cantidad de accidentes", 50, 20000, 1000, step=50)
     col = st.columns(2)
     anio_min = col[0].number_input("Año inicial", 2010, 2035, 2021)
@@ -44,14 +102,25 @@ with st.sidebar:
     p_dan = st.slider("% solo daños", 0.0, 1.0, 0.20, 0.01)
     p_mue = st.slider("% con muertos", 0.0, 1.0, 0.08, 0.01)
 
+    st.subheader("Barrios y vías")
+    if barrios_disp:
+        barrios_sel = st.multiselect("Barrios (de OSM)", barrios_disp,
+                                     default=barrios_disp[:min(20, len(barrios_disp))])
+    else:
+        st.caption("Aún no consultas la ciudad (o OSM no devolvió barrios). Puedes escribirlos:")
+        barrios_sel = [b.strip().upper() for b in
+                       st.text_area("Barrios (uno por línea)", "CENTRO\nSIN INFORMACION",
+                                    height=80).splitlines() if b.strip()]
+    if vias_disp:
+        vias_sel = st.multiselect("Vías rurales/principales (de OSM)", vias_disp,
+                                  default=vias_disp[:min(8, len(vias_disp))])
+    else:
+        vias_sel = [v.strip().upper() for v in
+                    st.text_input("Vías rurales (separadas por coma)",
+                                  "MONTERIA-CERETE, MONTERIA-PLANETA RICA").split(",") if v.strip()]
+
     st.subheader("Otros")
     p_rural = st.slider("% accidentes rurales (por km, se excluyen en la app)", 0.0, 0.3, 0.06, 0.01)
-    barrios_txt = st.text_area("Barrios (uno por línea)",
-        "CENTRO\nLA CEIBA\nSUCRE\nBUENAVISTA\nMONTERIA MODERNO\nLOS ALCAZARES\nEL RECREO\n"
-        "SANTA FE\nNARINO\nLA GRANJA\nP-5\nGALILEA\nEL DORADO\nCANTACLARO\nMOGAMBO\nSIN INFORMACION",
-        height=120)
-    vias_rurales_txt = st.text_input("Vías rurales (separadas por coma)",
-                                     "MONTERIA-CERETE, MONTERIA-PLANETA RICA, MONTERIA-ARBOLETES")
     semilla = st.number_input("Semilla aleatoria", 0, 999999, 2026)
     generar = st.button("▶️ Generar datos", type="primary")
 
@@ -60,8 +129,8 @@ with st.sidebar:
 # ------------------------------------------------------------
 def genera(params):
     rng = np.random.default_rng(params["semilla"])
-    barrios = [b.strip().upper() for b in params["barrios"].splitlines() if b.strip()] or ["SIN INFORMACION"]
-    vias_rur = [v.strip().upper() for v in params["vias_rurales"].split(",") if v.strip()] or ["VIA RURAL"]
+    barrios = params["barrios"] or ["SIN INFORMACION"]
+    vias_rur = params["vias_rurales"] or ["VIA RURAL"]
     clases = ["CHOQUE", "Choque", "ATROPELLO", "Atropello", "VOLCAMIENTO", "OTRO"]
 
     ps = np.array([params["p_her"], params["p_dan"], params["p_mue"]], dtype=float)
@@ -104,7 +173,7 @@ def genera(params):
     for _ in range(int(params["n_hot"])):
         hotspots.append((int(rng.integers(params["calle_min"], params["calle_max"] + 1)),
                          int(rng.integers(params["cra_min"], params["cra_max"] + 1)),
-                         rng.choice(barrios)))
+                         str(rng.choice(barrios))))
     for c, k, barrio in hotspots:
         for _ in range(int(rng.integers(params["hot_min"], params["hot_max"] + 1))):
             if len(filas) >= n_urb: break
@@ -113,7 +182,7 @@ def genera(params):
     while len(filas) < n_urb:
         c = int(rng.integers(params["calle_min"], params["calle_max"] + 1))
         k = int(rng.integers(params["cra_min"], params["cra_max"] + 1))
-        add(c, k, rng.choice(barrios), rng.choice(grav_labels, p=ps))
+        add(c, k, str(rng.choice(barrios)), rng.choice(grav_labels, p=ps))
 
     for _ in range(n_rural):
         cod += 1
@@ -132,7 +201,10 @@ if generar:
     if anio_max < anio_min or calle_max < calle_min or cra_max < cra_min:
         st.error("Revisa los rangos: el máximo no puede ser menor que el mínimo.")
         st.stop()
-    params = dict(semilla=semilla, barrios=barrios_txt, vias_rurales=vias_rurales_txt,
+    if not barrios_sel:
+        st.error("Selecciona (o escribe) al menos un barrio.")
+        st.stop()
+    params = dict(semilla=semilla, barrios=list(barrios_sel), vias_rurales=list(vias_sel),
                   p_her=p_her, p_dan=p_dan, p_mue=p_mue, anio_min=anio_min, anio_max=anio_max,
                   calle_min=calle_min, calle_max=calle_max, cra_min=cra_min, cra_max=cra_max,
                   n_hot=n_hot, hot_min=hot_min, hot_max=hot_max, n_total=n_total, p_rural=p_rural)
@@ -140,7 +212,8 @@ if generar:
     st.session_state["gen_ciudad"] = ciudad
 
 if "gen" not in st.session_state:
-    st.info("Ajusta los parámetros en la barra lateral y pulsa **Generar datos**.")
+    st.info("1) Elige la ciudad y pulsa **Consultar barrios y vías**. "
+            "2) Ajusta los parámetros. 3) Pulsa **Generar datos**.")
     st.stop()
 
 df = st.session_state["gen"]
