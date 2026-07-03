@@ -190,7 +190,8 @@ def features_entorno(ciudad):
     return pd.DataFrame(out, index=inter.index)
 
 def localiza(v1, v2, via_a_nodos, sc):
-    if v1 is None or v2 is None:
+    # tras df.apply, los None se vuelven NaN (float); exigir tuplas reales
+    if not isinstance(v1, tuple) or not isinstance(v2, tuple):
         return None
     for c1 in candidatos(v1):
         for c2 in candidatos(v2):
