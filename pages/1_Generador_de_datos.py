@@ -61,7 +61,11 @@ def _consulta_osm(ciudad, tags, radio_km=8):
 
 @st.cache_data(show_spinner=False)
 def osm_barrios(ciudad, radio_km=8):
-    return _consulta_osm(ciudad, {"place": ["suburb", "neighbourhood", "quarter", "borough"]}, radio_km)
+    # además de los puntos de barrio, se incluyen las zonas residenciales con
+    # nombre (muchos barrios en OSM están mapeados así) para maximizar cobertura.
+    return _consulta_osm(ciudad, {"place": ["suburb", "neighbourhood", "quarter",
+                                            "borough", "locality", "hamlet"],
+                                  "landuse": "residential"}, radio_km)
 
 @st.cache_data(show_spinner=False)
 def osm_vias(ciudad, radio_km=8):
@@ -119,13 +123,13 @@ with st.sidebar:
 
     st.subheader("Barrios y vías")
     if barrios_disp:
-        barrios_sel = st.multiselect("Barrios (de OSM)", barrios_disp,
-                                     default=barrios_disp[:min(20, len(barrios_disp))])
-    else:
-        st.caption("Aún no consultas la ciudad (o OSM no devolvió barrios). Puedes escribirlos:")
-        barrios_sel = [b.strip().upper() for b in
-                       st.text_area("Barrios (uno por línea)", "CENTRO\nSIN INFORMACION",
-                                    height=80).splitlines() if b.strip()]
+        st.caption(f"OSM encontró {len(barrios_disp)} barrios. Si faltan (OSM no siempre los "
+                   "tiene todos), agrégalos abajo, uno por línea.")
+    extra_txt = st.text_area("Barrios adicionales (uno por línea, opcional)", "", height=90)
+    extra_b = [b.strip().upper() for b in extra_txt.splitlines() if b.strip()]
+    opciones_b = sorted(set(barrios_disp) | set(extra_b)) or ["CENTRO", "SIN INFORMACION"]
+    barrios_sel = st.multiselect("Barrios a usar", opciones_b,
+                                 default=opciones_b[:min(40, len(opciones_b))])
     if vias_disp:
         vias_sel = st.multiselect("Vías rurales/principales (de OSM)", vias_disp,
                                   default=vias_disp[:min(8, len(vias_disp))])
@@ -260,5 +264,6 @@ try:
     st.page_link("app.py", label="➡️ Ir a la página de Análisis", icon="📊")
 except Exception:
     st.caption("Abre la página principal desde el menú de la barra lateral.")
+
 
 
