@@ -238,46 +238,129 @@ with st.sidebar:
 # para que las interacciones posteriores —radio de mapas, descargas— NO
 # borren la vista ni recalculen todo).
 # ============================================================
-def construye_mapa_intersecciones(inter, nodos_ll):
+def mapa_tramos_severidad(loc, aristas_ll, via_a_aristas):
+    """Tramos coloreados por severidad acumulada. LayerControl + leyenda de color."""
+    import folium, branca
+    centro = [aristas_ll.geometry.centroid.y.mean(), aristas_ll.geometry.centroid.x.mean()]
+    sev_a, acc_a, via_a = {}, {}, {}
+    for r in loc.itertuples():
+        for clave in (r.clave_v1, r.clave_v2):
+            if not isinstance(clave, tuple):
+                continue
+            for (u, v, k) in via_a_aristas.get(clave, []):
+                if r.nodo in (u, v):
+                    sev_a[(u, v, k)] = sev_a.get((u, v, k), 0) + r.severidad
+                    acc_a[(u, v, k)] = acc_a.get((u, v, k), 0) + 1
+                    via_a[(u, v, k)] = (f"{'Calle' if clave[0]=='H' else 'Carrera' if clave[0]=='V' else clave[0].title()}"
+                                        f" {clave[1]}")
+    tr = aristas_ll.reset_index()
+    tr["severidad"]  = tr.apply(lambda r: sev_a.get((r.u, r.v, r.key), 0), axis=1)
+    tr["accidentes"] = tr.apply(lambda r: acc_a.get((r.u, r.v, r.key), 0), axis=1)
+    tr["via"]        = tr.apply(lambda r: via_a.get((r.u, r.v, r.key), ""), axis=1)
+    tr = tr.to_crs(32618); tr["geometry"] = tr.geometry.simplify(8); tr = tr.to_crs(4326)
+    m = folium.Map(centro, zoom_start=14, tiles="cartodbpositron", prefer_canvas=True)
+    folium.GeoJson(tr[["geometry"]], style_function=lambda f: {"color": "#cccccc", "weight": 0.8},
+                   name="Red vial").add_to(m)
+    crit = tr[tr["accidentes"] > 0].copy()
+    vmax = float(crit["severidad"].quantile(0.95)) if len(crit) else 1.0
+    vmax = vmax or 1.0
+    cmap = branca.colormap.linear.YlOrRd_09.scale(0, vmax)
+    folium.GeoJson(crit[["geometry", "via", "accidentes", "severidad"]],
+        style_function=lambda f: {"color": cmap(min(f["properties"]["severidad"], vmax)),
+                                  "weight": 4.5, "opacity": 0.9},
+        tooltip=folium.GeoJsonTooltip(fields=["via", "accidentes", "severidad"],
+                                      aliases=["Vía", "Siniestros", "Severidad"]),
+        name="Tramos con siniestros").add_to(m)
+    cmap.caption = "Severidad del tramo"; m.add_child(cmap)
+    folium.LayerControl(collapsed=False).add_to(m)
+    return m.get_root().render()
+
+def mapa_intersecciones(loc, nodos_ll):
+    """Círculos por severidad + calor + top 15 críticas. Capas conmutables."""
     import folium
     from folium.plugins import HeatMap
     centro = [nodos_ll.geometry.y.mean(), nodos_ll.geometry.x.mean()]
+    agg_n = loc.groupby("nodo").agg(n_acc=("codigo", "count"), severidad=("severidad", "sum"),
+                                    muertes=("muertes", "sum"), heridos=("heridos", "sum"))
+    sitio  = loc.groupby("nodo")["direccion"].agg(lambda s: s.mode().iloc[0])
+    barrio = loc.groupby("nodo")["barrio"].agg(lambda s: s.mode().iloc[0])
+    def color(s):
+        return "#b30000" if s >= 30 else "#e34a33" if s >= 15 else "#fc8d59" if s >= 6 else "#fdbb84"
     m = folium.Map(centro, zoom_start=14, tiles="cartodbpositron", prefer_canvas=True)
-    agg_n = inter[inter["n_acc"] > 0]
-    if len(agg_n):
-        imax = float(agg_n["severidad"].max())
-        HeatMap([[float(nodos_ll.loc[n].geometry.y), float(nodos_ll.loc[n].geometry.x),
-                  float(s / imax)] for n, s in agg_n["severidad"].items()],
-                radius=18, blur=14).add_to(m)
-        for n, r in agg_n.nlargest(15, "severidad").iterrows():
-            p = nodos_ll.loc[n].geometry
-            folium.CircleMarker([float(p.y), float(p.x)], radius=float(3 + r["severidad"]**0.5),
-                color="#b30000", fill=True, fill_opacity=0.7, weight=0.5,
-                tooltip=f"Siniestros: {int(r['n_acc'])} · Severidad: {int(r['severidad'])}").add_to(m)
+    fg = folium.FeatureGroup(name="Intersecciones (severidad)").add_to(m)
+    for nodo, r in agg_n.iterrows():
+        p = nodos_ll.loc[nodo].geometry
+        folium.CircleMarker([float(p.y), float(p.x)], radius=float(3 + r["severidad"]**0.5),
+            color=color(r["severidad"]), fill=True, fill_opacity=0.7, weight=0.5,
+            popup=folium.Popup(f"<b>{sitio[nodo]}</b><br>{barrio[nodo]}<br>Siniestros: {int(r['n_acc'])}"
+                               f"<br>Heridos: {int(r['heridos'])} | Muertes: {int(r['muertes'])}"
+                               f"<br>Severidad: {int(r['severidad'])}", max_width=250)).add_to(fg)
+    HeatMap([[float(nodos_ll.loc[n].geometry.y), float(nodos_ll.loc[n].geometry.x), float(r["severidad"])]
+             for n, r in agg_n.iterrows()], radius=18, blur=14, name="Calor de severidad").add_to(m)
+    fgt = folium.FeatureGroup(name="Top 15 críticas", show=False).add_to(m)
+    for nodo, r in agg_n.nlargest(15, "severidad").iterrows():
+        p = nodos_ll.loc[nodo].geometry
+        folium.Marker([float(p.y), float(p.x)], icon=folium.Icon(color="red", icon="exclamation-sign"),
+            popup=folium.Popup(f"<b>{sitio[nodo]}</b><br>Siniestros: {int(r['n_acc'])}"
+                               f"<br>Heridos: {int(r['heridos'])} | Muertes: {int(r['muertes'])}"
+                               f"<br>Severidad: {int(r['severidad'])}", max_width=250)).add_to(fgt)
+    folium.LayerControl(collapsed=False).add_to(m)
     return m.get_root().render()
 
-def construye_mapa_tramos(inter, aristas_ll):
-    import folium, branca
-    centro = [aristas_ll.geometry.centroid.y.mean(), aristas_ll.geometry.centroid.x.mean()]
-    m = folium.Map(centro, zoom_start=14, tiles="cartodbpositron", prefer_canvas=True)
+def mapa_prioridad(inter, aristas_ll):
+    """Tramos en 5 clases de prioridad (percentil) + inspección/prevención.
+    LayerControl con casillas por clase + leyenda HTML fija."""
+    import folium
     p_nodo = inter["pct_p"].to_dict()
+    top_resid = set(inter[inter["y"] == 1].nlargest(12, "residuo").index)
+    top_prev  = set(inter[inter["y"] == 0].nlargest(12, "p_oof").index)
     tr = aristas_ll.reset_index()
     def p_de(u, v):
         vals = [p_nodo[n] for n in (u, v) if n in p_nodo]
         return float(np.mean(vals)) if vals else np.nan
-    tr["p_tramo"] = tr.apply(lambda r: p_de(r.u, r.v), axis=1)
+    tr["p_tramo"]  = tr.apply(lambda r: p_de(r.u, r.v), axis=1)
+    tr["alerta"]   = tr.apply(lambda r: (r.u in top_resid) or (r.v in top_resid), axis=1)
+    tr["prevenir"] = tr.apply(lambda r: (r.u in top_prev) or (r.v in top_prev), axis=1)
     tr["via"] = tr["name"].apply(lambda n: (n[0] if isinstance(n, list) else n) or "")
-    folium.GeoJson(tr[tr["p_tramo"].isna()][["geometry"]],
-                   style_function=lambda f: {"color": "#d9d9d9", "weight": 0.8}).add_to(m)
-    cmap = branca.colormap.linear.YlOrRd_09.scale(0, 1)
-    con_p = tr[tr["p_tramo"].notna()].copy()
-    con_p["p_tramo"] = con_p["p_tramo"].round(3)
-    folium.GeoJson(con_p[["geometry", "via", "p_tramo"]],
-        style_function=lambda f: {"color": cmap(f["properties"]["p_tramo"]),
-                                  "weight": 1.5 + 5 * f["properties"]["p_tramo"], "opacity": 0.9},
-        tooltip=folium.GeoJsonTooltip(fields=["via", "p_tramo"],
-                                      aliases=["Vía", "Percentil criticidad"])).add_to(m)
-    cmap.caption = "Percentil de criticidad predicha del tramo"; m.add_child(cmap)
+    tr = tr.to_crs(32618); tr["geometry"] = tr.geometry.simplify(8); tr = tr.to_crs(4326)
+    def clase(p):
+        if p >= 0.95: return "Muy alta (top 5%)"
+        if p >= 0.90: return "Alta (top 10%)"
+        if p >= 0.75: return "Media (top 25%)"
+        if p >= 0.50: return "Baja"
+        return "Mínima"
+    ESTILO = {"Muy alta (top 5%)": ("#a50026", 6.0), "Alta (top 10%)": ("#e34a33", 4.5),
+              "Media (top 25%)": ("#fdae61", 3.0), "Baja": ("#ffe8a8", 1.8), "Mínima": ("#d9d9d9", 1.0)}
+    tr["clase"] = tr["p_tramo"].apply(lambda p: clase(p) if pd.notna(p) else "Mínima")
+    centro = [aristas_ll.geometry.centroid.y.mean(), aristas_ll.geometry.centroid.x.mean()]
+    m = folium.Map(centro, zoom_start=14, tiles="cartodbpositron", prefer_canvas=True)
+    for nombre in ["Mínima", "Baja", "Media (top 25%)", "Alta (top 10%)", "Muy alta (top 5%)"]:
+        sub = tr[tr["clase"] == nombre]
+        if len(sub) == 0:
+            continue
+        col, w = ESTILO[nombre]
+        folium.GeoJson(sub[["geometry", "via", "p_tramo"]].assign(p_tramo=lambda d: d["p_tramo"].round(3)),
+            style_function=lambda f, c=col, ww=w: {"color": c, "weight": ww, "opacity": 0.9},
+            tooltip=folium.GeoJsonTooltip(fields=["via", "p_tramo"], aliases=["Vía", "Percentil"]),
+            name=f"Prioridad {nombre}").add_to(m)
+    folium.GeoJson(tr[tr["alerta"]][["geometry", "via"]],
+        style_function=lambda f: {"color": "#7b3294", "weight": 6, "opacity": 0.95, "dashArray": "6 4"},
+        tooltip=folium.GeoJsonTooltip(fields=["via"], aliases=["Inspección de campo:"]),
+        name="Más peligrosos de lo esperado (inspección)", show=True).add_to(m)
+    folium.GeoJson(tr[tr["prevenir"] & ~tr["alerta"]][["geometry", "via"]],
+        style_function=lambda f: {"color": "#0571b0", "weight": 4.5, "opacity": 0.95, "dashArray": "2 6"},
+        tooltip=folium.GeoJsonTooltip(fields=["via"], aliases=["Prevención:"]),
+        name="Riesgo estructural (prevención)", show=False).add_to(m)
+    leyenda = """<div style="position:fixed; bottom:24px; left:12px; z-index:9999; background:white;
+     padding:10px 14px; border-radius:6px; box-shadow:0 1px 5px rgba(0,0,0,.3); font-size:12px;">
+     <b>Prioridad de intervención</b><br>
+     <span style="color:#a50026;">━━</span> Muy alta (top 5%)<br>
+     <span style="color:#e34a33;">━━</span> Alta (top 10%)<br>
+     <span style="color:#fdae61;">━━</span> Media (top 25%)<br>
+     <span style="color:#ffe8a8;">━━</span> Baja<br>
+     <span style="color:#d9d9d9;">━━</span> Mínima</div>"""
+    m.get_root().html.add_child(folium.Element(leyenda))
+    folium.LayerControl(collapsed=False).add_to(m)
     return m.get_root().render()
 
 if ejecutar:
@@ -290,7 +373,8 @@ if ejecutar:
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import make_pipeline
-    from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
+    from sklearn.metrics import (roc_auc_score, average_precision_score, confusion_matrix,
+                                 roc_curve, precision_recall_curve)
     import osmnx as ox
 
     avisos = []
@@ -372,16 +456,20 @@ if ejecutar:
         metr = {}
         if metrico:
             cm = confusion_matrix(y, (oof >= np.quantile(oof, 0.90)).astype(int))
+            fpr, tpr, _ = roc_curve(y, oof)
+            prec, rec, _ = precision_recall_curve(y, oof)
             metr = {"roc": roc_auc_score(y, oof), "pr": average_precision_score(y, oof),
-                    "rec": recall_at_k(y, oof), "cm": cm}
+                    "rec": recall_at_k(y, oof), "cm": cm,
+                    "fpr": fpr, "tpr": tpr, "prec": prec, "rec_curve": rec}
         # guardar TODO lo necesario para mostrar sin recalcular
         st.session_state["R"] = {
             "df": df, "inter": inter, "loc": loc, "ref": ref, "y": y, "oof": oof,
             "metrico": metrico, "metr": metr, "avisos": avisos,
             "cobertura": comp.sum()/max(1, urb.sum()), "rurales": int((~urb).sum()),
             "prevalencia": float(y.mean()), "ubicados": int(df["nodo"].notna().sum()),
-            "mapa_int": construye_mapa_intersecciones(inter, nodos_ll),
-            "mapa_tramos": construye_mapa_tramos(inter, aristas_ll),
+            "mapa_severidad": mapa_tramos_severidad(loc, aristas_ll, via_a_aristas),
+            "mapa_int": mapa_intersecciones(loc, nodos_ll),
+            "mapa_prioridad": mapa_prioridad(inter, aristas_ll),
         }
 
 # ============================================================
@@ -478,11 +566,32 @@ with t2:
 
 with t3:
     if R["metrico"]:
+        M = R["metr"]
         c1, c2, c3 = st.columns(3)
-        c1.metric("ROC-AUC", f"{R['metr']['roc']:.3f}")
-        c2.metric("PR-AUC", f"{R['metr']['pr']:.3f}", f"base {R['prevalencia']:.3f}")
-        c3.metric("Recall@10%", f"{R['metr']['rec']:.3f}")
-        cm = R["metr"]["cm"]
+        c1.metric("ROC-AUC", f"{M['roc']:.3f}")
+        c2.metric("PR-AUC", f"{M['pr']:.3f}", f"base {R['prevalencia']:.3f}")
+        c3.metric("Recall@10%", f"{M['rec']:.3f}")
+
+        cc = st.columns(2)
+        # curva ROC
+        figroc = px.area(x=M["fpr"], y=M["tpr"],
+                         labels={"x": "Tasa de falsos positivos (FPR)", "y": "Tasa de verdaderos positivos (TPR)"},
+                         title=f"Curva ROC (AUC = {M['roc']:.3f})",
+                         color_discrete_sequence=["#d7301f"])
+        figroc.add_shape(type="line", line=dict(dash="dash", color="gray"), x0=0, y0=0, x1=1, y1=1)
+        figroc.update_layout(height=360, margin=dict(t=40, b=0), xaxis_range=[0, 1], yaxis_range=[0, 1])
+        cc[0].plotly_chart(figroc, use_container_width=True)
+        # curva Precisión-Exhaustividad
+        figpr = px.line(x=M["rec_curve"], y=M["prec"],
+                        labels={"x": "Exhaustividad (Recall)", "y": "Precisión"},
+                        title=f"Curva Precisión-Recall (PR-AUC = {M['pr']:.3f})",
+                        color_discrete_sequence=["#2b8cbe"])
+        figpr.add_hline(y=R["prevalencia"], line_dash="dash", line_color="gray",
+                        annotation_text=f"base = {R['prevalencia']:.3f}")
+        figpr.update_layout(height=360, margin=dict(t=40, b=0), xaxis_range=[0, 1], yaxis_range=[0, 1])
+        cc[1].plotly_chart(figpr, use_container_width=True)
+
+        cm = M["cm"]
         fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues",
                         x=["Pred: no", "Pred: sí"], y=["Real: no", "Real: sí"],
                         title="Matriz de confusión (umbral top 10%)")
@@ -499,10 +608,17 @@ with t3:
                  [["n_acc", "p_oof", "grado", "betweenness", "generadores_300m"]].round(3))
 
 with t4:
-    vista = st.radio("Vista", ["Intersecciones (severidad)", "Tramos por criticidad predicha"],
-                     horizontal=True)
-    html = R["mapa_int"] if vista.startswith("Intersecciones") else R["mapa_tramos"]
-    components.html(html, height=580, scrolling=False)
+    st.caption("Usa el control de capas (arriba a la derecha de cada mapa) para activar y "
+               "desactivar capas.")
+    vista = st.radio("Vista", ["Tramos críticos (severidad)", "Intersecciones críticas",
+                               "Vías por prioridad predicha"], horizontal=True)
+    if vista.startswith("Tramos"):
+        html = R["mapa_severidad"]
+    elif vista.startswith("Intersecciones"):
+        html = R["mapa_int"]
+    else:
+        html = R["mapa_prioridad"]
+    components.html(html, height=600, scrolling=False)
 
 # ---------- Descargas ----------
 st.sidebar.markdown("---")
