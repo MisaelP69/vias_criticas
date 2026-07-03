@@ -80,9 +80,9 @@ with st.sidebar:
     else:
         ciudad = sel
 
-    radio_osm = st.slider("Radio de consulta desde el centro (km)", 2, 15, 8,
-                          help="Consulta barrios y vías solo alrededor del centro. "
-                               "Menor radio = más rápido en ciudades grandes.")
+    radio_osm = st.slider("Radio de consulta desde el centro (km)", 2, 40, 15,
+                          help="Consulta barrios y vías alrededor del centro. Amplíalo para cubrir "
+                               "todo el municipio; radios grandes en ciudades enormes pueden tardar más.")
     cargar = st.button("🔎 Consultar barrios y vías de la ciudad")
     if cargar:
         with st.spinner(f"Consultando OpenStreetMap para «{ciudad}» (radio {radio_osm} km)…"):
@@ -260,4 +260,5 @@ try:
     st.page_link("app.py", label="➡️ Ir a la página de Análisis", icon="📊")
 except Exception:
     st.caption("Abre la página principal desde el menú de la barra lateral.")
+
 
