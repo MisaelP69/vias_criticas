@@ -7,12 +7,16 @@
 # Ejecutar en local:  streamlit run app.py
 # Desplegar:          Streamlit Community Cloud o Hugging Face Spaces (ver README).
 # ============================================================
-import re, unicodedata, math, io
+import re, unicodedata, math, io, os, pickle
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Intersecciones críticas", layout="wide")
+
+# Caché en disco para sobrevivir reinicios/suspensión del plan gratuito
+CACHE_DIR = ".cache_ciudades"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ------------------------------------------------------------
 # Utilidades de limpieza y parser (idénticas al pipeline validado)
@@ -91,6 +95,8 @@ def limpia_csv(df):
 def carga_red(ciudad):
     """Descarga y proyecta el grafo de OSM. Cacheado por ciudad."""
     import osmnx as ox
+    ox.settings.use_cache = True     # OSMnx cachea en disco la descarga de Overpass
+    ox.settings.timeout = 180
     G = ox.graph_from_place(ciudad, network_type="drive")
     G_proj = ox.project_graph(G)                       # UTM automático
     return G, G_proj
@@ -108,8 +114,16 @@ def candidatos(via):
 
 @st.cache_resource(show_spinner=False)
 def features_red(ciudad):
-    """Construye intersecciones + índices de vía + betweenness. Cacheado por ciudad."""
+    """Intersecciones + índices de vía + betweenness APROXIMADA, con caché en disco.
+    Optimizaciones: (1) betweenness por muestreo de pivotes (k) -> mucho más rápida
+    con ordenamiento casi idéntico; (2) persistencia en disco -> reinicios instantáneos."""
     import osmnx as ox, networkx as nx
+
+    ruta = os.path.join(CACHE_DIR, re.sub(r"\W+", "_", ciudad) + ".pkl")
+    if os.path.exists(ruta):                 # ya se calculó antes -> lectura instantánea
+        with open(ruta, "rb") as f:
+            return pickle.load(f)
+
     G, G_proj = carga_red(ciudad)
     nodos, aristas = ox.graph_to_gdfs(G_proj)
     via_a_nodos, via_a_aristas = {}, {}
@@ -123,11 +137,17 @@ def features_red(ciudad):
                 via_a_nodos.setdefault(cl, set()).update([u, v])
                 via_a_aristas.setdefault(cl, []).append((u, v, k))
     inter = nodos[nodos["street_count"] >= 3].copy()
+
     G_u = ox.convert.to_undirected(G_proj)
-    btw = nx.betweenness_centrality(G_u, weight="length")
+    k = min(500, G_u.number_of_nodes())      # muestreo: 500 pivotes (exacta si es menor)
+    btw = nx.betweenness_centrality(G_u, k=k, weight="length", seed=42)
     inter["grado"] = inter["street_count"]
     inter["betweenness"] = pd.Series(btw).reindex(inter.index).fillna(0)
-    return G, G_proj, nodos, aristas, inter, via_a_nodos, via_a_aristas
+
+    salida = (G, G_proj, nodos, aristas, inter, via_a_nodos, via_a_aristas)
+    with open(ruta, "wb") as f:              # persiste para el próximo arranque
+        pickle.dump(salida, f)
+    return salida
 
 CATEGORIAS_POI = {
     "educacion":   {"amenity": ["school", "university", "college", "kindergarten"]},
