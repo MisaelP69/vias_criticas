@@ -36,9 +36,10 @@ CIUDADES = [
 # ------------------------------------------------------------
 # Consultas a OpenStreetMap (cacheadas por ciudad)
 # ------------------------------------------------------------
-def _consulta_osm(ciudad, tags, radio_km=8):
-    """Consulta OSM en un círculo de radio_km alrededor del centro (rápido y
-    confiable en ciudades grandes), con reintentos y servidores espejo."""
+@st.cache_data(show_spinner=False)
+def osm_barrios_vias(ciudad, radio_km=8):
+    """UNA sola consulta a OSM (rápida) que devuelve (barrios, vías) del círculo
+    alrededor del centro. Reintenta con servidores espejo si el principal falla."""
     import osmnx as ox, time
     ox.settings.use_cache = True
     for attr, val in [("requests_timeout", 180), ("timeout", 180)]:
@@ -47,30 +48,26 @@ def _consulta_osm(ciudad, tags, radio_km=8):
     endpoints = ["https://overpass-api.de/api",
                  "https://overpass.kumi.systems/api",
                  "https://maps.mail.ru/osm/tools/overpass/api"]
+    tags = {"place": ["suburb", "neighbourhood", "quarter", "borough", "locality", "hamlet"],
+            "landuse": "residential",
+            "highway": ["motorway", "trunk", "primary"]}
     for ep in endpoints:
         for attr in ("overpass_url", "overpass_endpoint"):
             try: setattr(ox.settings, attr, ep)
             except Exception: pass
         try:
-            lat, lon = ox.geocode(ciudad)                        # centro de la ciudad
+            lat, lon = ox.geocode(ciudad)
             g = ox.features_from_point((lat, lon), tags=tags, dist=int(radio_km * 1000))
-            return sorted({str(n).upper() for n in g.get("name", pd.Series(dtype=str)).dropna()})
+            def nombres(mask):
+                return sorted({str(x).upper() for x in g[mask].get("name", pd.Series(dtype=str)).dropna()})
+            es_barrio = pd.Series(False, index=g.index)
+            if "place" in g:   es_barrio = es_barrio | g["place"].notna()
+            if "landuse" in g: es_barrio = es_barrio | (g["landuse"] == "residential")
+            es_via = g["highway"].notna() if "highway" in g.columns else pd.Series(False, index=g.index)
+            return nombres(es_barrio), nombres(es_via)
         except Exception:
             time.sleep(2)
-    return []
-
-@st.cache_data(show_spinner=False)
-def osm_barrios(ciudad, radio_km=8):
-    # además de los puntos de barrio, se incluyen las zonas residenciales con
-    # nombre (muchos barrios en OSM están mapeados así) para maximizar cobertura.
-    return _consulta_osm(ciudad, {"place": ["suburb", "neighbourhood", "quarter",
-                                            "borough", "locality", "hamlet"],
-                                  "landuse": "residential"}, radio_km)
-
-@st.cache_data(show_spinner=False)
-def osm_vias(ciudad, radio_km=8):
-    # solo vías mayores (motorway/trunk/primary): más liviano que incluir secundarias
-    return _consulta_osm(ciudad, {"highway": ["motorway", "trunk", "primary"]}, radio_km)
+    return [], []
 
 # ------------------------------------------------------------
 # CONTROLES
@@ -90,8 +87,9 @@ with st.sidebar:
     cargar = st.button("🔎 Consultar barrios y vías de la ciudad")
     if cargar:
         with st.spinner(f"Consultando OpenStreetMap para «{ciudad}» (radio {radio_osm} km)…"):
-            st.session_state["barrios_ciudad"] = osm_barrios(ciudad, radio_osm)
-            st.session_state["vias_ciudad"] = osm_vias(ciudad, radio_osm)
+            b, v = osm_barrios_vias(ciudad, radio_osm)
+            st.session_state["barrios_ciudad"] = b
+            st.session_state["vias_ciudad"] = v
             st.session_state["ciudad_cargada"] = ciudad
 
     barrios_disp = st.session_state.get("barrios_ciudad", [])
@@ -264,6 +262,7 @@ try:
     st.page_link("app.py", label="➡️ Ir a la página de Análisis", icon="📊")
 except Exception:
     st.caption("Abre la página principal desde el menú de la barra lateral.")
+
 
 
 
