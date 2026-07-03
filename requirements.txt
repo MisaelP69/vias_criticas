@@ -1,0 +1,12 @@
+streamlit>=1.30
+streamlit-folium>=0.20
+osmnx>=2.0
+geopandas
+networkx
+pandas
+numpy
+scipy
+scikit-learn
+folium
+branca
+mapclassify
