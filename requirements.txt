@@ -1,5 +1,6 @@
 streamlit>=1.30
 streamlit-folium>=0.20
+plotly>=5.18
 osmnx>=2.0
 geopandas
 networkx
