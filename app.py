@@ -18,6 +18,20 @@ st.set_page_config(page_title="Intersecciones críticas", layout="wide")
 CACHE_DIR = ".cache_ciudades"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# Ciudades frecuentes para el desplegable (elige «Otra…» para escribir cualquiera de OSM)
+CIUDADES = [
+    "Acacías, Meta, Colombia", "Villavicencio, Meta, Colombia", "Granada, Meta, Colombia",
+    "Montería, Córdoba, Colombia", "Cereté, Córdoba, Colombia", "Lorica, Córdoba, Colombia",
+    "Bogotá, Colombia", "Medellín, Antioquia, Colombia", "Cali, Valle del Cauca, Colombia",
+    "Barranquilla, Atlántico, Colombia", "Cartagena, Bolívar, Colombia", "Cúcuta, Norte de Santander, Colombia",
+    "Bucaramanga, Santander, Colombia", "Pereira, Risaralda, Colombia", "Santa Marta, Magdalena, Colombia",
+    "Ibagué, Tolima, Colombia", "Manizales, Caldas, Colombia", "Neiva, Huila, Colombia",
+    "Pasto, Nariño, Colombia", "Armenia, Quindío, Colombia", "Sincelejo, Sucre, Colombia",
+    "Popayán, Cauca, Colombia", "Valledupar, Cesar, Colombia", "Tunja, Boyacá, Colombia",
+    "Yopal, Casanare, Colombia", "Girardot, Cundinamarca, Colombia", "Palmira, Valle del Cauca, Colombia",
+    "Otra ciudad (escribir)…",
+]
+
 # ------------------------------------------------------------
 # Utilidades de limpieza y parser (idénticas al pipeline validado)
 # ------------------------------------------------------------
@@ -216,9 +230,31 @@ st.caption("Modo multi-ciudad · sube un CSV de accidentes e indica la ciudad. "
 
 with st.sidebar:
     st.header("⚙️ Configuración")
-    ciudad = st.text_input("Ciudad (como en OpenStreetMap)", "Acacías, Meta, Colombia",
-                           help="Ej: 'Villavicencio, Meta, Colombia'. Debe existir en OSM.")
-    archivo = st.file_uploader("CSV de accidentes", type=["csv"])
+
+    # --- fuente de datos: CSV subido o datos generados en la otra página ---
+    tiene_gen = "gen" in st.session_state
+    opciones = ["Subir un CSV"] + (["Usar datos generados (página Generador)"] if tiene_gen else [])
+    fuente = st.radio("Datos de accidentes", opciones)
+    archivo = None
+    if fuente == "Subir un CSV":
+        archivo = st.file_uploader("CSV de accidentes", type=["csv"])
+    else:
+        st.success(f"Se usarán {len(st.session_state['gen'])} accidentes generados "
+                   f"para «{st.session_state.get('gen_ciudad', '?')}».")
+
+    # --- ciudad como desplegable buscable ---
+    gc = st.session_state.get("gen_ciudad")
+    lista = ([gc] if (gc and gc not in CIUDADES) else []) + CIUDADES
+    if fuente != "Subir un CSV" and gc in lista:
+        idx = lista.index(gc)                       # al usar datos generados, precarga su ciudad
+    else:
+        idx = lista.index("Acacías, Meta, Colombia") if "Acacías, Meta, Colombia" in lista else 0
+    sel = st.selectbox("Ciudad (escribe para buscar)", lista, index=idx)
+    if sel == "Otra ciudad (escribir)…":
+        ciudad = st.text_input("Escribe la ciudad como en OpenStreetMap", "Acacías, Meta, Colombia")
+    else:
+        ciudad = sel
+
     modelo_sel = st.selectbox("Modelo", ["Regresión Logística (interpretable)", "Random Forest"])
     bloque_km = st.slider("Tamaño de bloque espacial (km)", 0.5, 3.0, 1.0, 0.5,
                           help="Grupo de la validación cruzada espacial. Mayor = más estricto.")
@@ -364,7 +400,7 @@ def mapa_prioridad(inter, aristas_ll):
     return m.get_root().render()
 
 if ejecutar:
-    if archivo is None:
+    if fuente == "Subir un CSV" and archivo is None:
         st.error("Sube un archivo CSV para continuar.")
         st.stop()
     from scipy.spatial import cKDTree
@@ -379,9 +415,12 @@ if ejecutar:
 
     avisos = []
     try:
-        df = limpia_csv(pd.read_csv(archivo))
+        if fuente == "Subir un CSV":
+            df = limpia_csv(pd.read_csv(archivo))
+        else:
+            df = limpia_csv(st.session_state["gen"].copy())   # datos de la página Generador
     except Exception as e:
-        st.error(f"Error leyendo/limpiando el CSV: {e}"); st.stop()
+        st.error(f"Error leyendo/limpiando los datos: {e}"); st.stop()
 
     urb = df["parse_metodo"] != "rural/km"
     comp = df["v1"].notna() & df["v2"].notna()
