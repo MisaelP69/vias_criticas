@@ -232,6 +232,16 @@ cc[1].plotly_chart(px.bar(cl, x="n", y="clase", orientation="h", title="Clase",
 
 st.dataframe(df.head(20), use_container_width=True)
 
+st.divider()
+st.subheader("¿Qué hacer con estos datos?")
+col = st.columns(2)
 nombre = "Accidentes_" + "".join(ch for ch in st.session_state["gen_ciudad"].split(",")[0] if ch.isalnum()) + ".csv"
-st.download_button("⬇️ Descargar CSV", df.to_csv(index=False).encode("utf-8"),
-                   file_name=nombre, mime="text/csv", type="primary")
+col[0].download_button("⬇️ Descargar CSV", df.to_csv(index=False).encode("utf-8"),
+                       file_name=nombre, mime="text/csv")
+col[1].success("✅ Los datos ya quedaron disponibles para la página de análisis. "
+               "Ve allí, elige **«Usar datos generados»** y pulsa Ejecutar.")
+# enlace directo a la página principal (el nombre del archivo de entrada puede variar)
+try:
+    st.page_link("app.py", label="➡️ Ir a la página de Análisis", icon="📊")
+except Exception:
+    st.caption("Abre la página principal desde el menú de la barra lateral.")
