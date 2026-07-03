@@ -106,17 +106,16 @@ def limpia_csv(df):
 # Descarga de red y features (cacheadas: es la parte lenta)
 # ------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
-def carga_red(ciudad):
-    """Descarga y proyecta el grafo de OSM. Reintenta con servidores Overpass
-    alternativos (espejos) si el principal rechaza la conexión o se satura.
-    Cacheado por ciudad."""
+def carga_red(ciudad, radio_km=0):
+    """Descarga y proyecta el grafo de OSM. Si radio_km>0, descarga solo un
+    círculo de ese radio alrededor del centro (mucho más rápido en ciudades
+    grandes). Reintenta con servidores Overpass alternativos si el principal falla."""
     import osmnx as ox, time
     ox.settings.use_cache = True     # OSMnx cachea en disco la descarga de Overpass
     for attr, val in [("requests_timeout", 300), ("timeout", 300)]:
         try: setattr(ox.settings, attr, val)   # el nombre varía según versión de OSMnx
         except Exception: pass
 
-    # servidores Overpass alternativos: si el primero falla, prueba los espejos
     endpoints = ["https://overpass-api.de/api",
                  "https://overpass.kumi.systems/api",
                  "https://maps.mail.ru/osm/tools/overpass/api"]
@@ -127,7 +126,12 @@ def carga_red(ciudad):
             except Exception: pass
         for _ in range(2):                     # 2 intentos por servidor
             try:
-                G = ox.graph_from_place(ciudad, network_type="drive")
+                if radio_km and radio_km > 0:
+                    lat, lon = ox.geocode(ciudad)
+                    G = ox.graph_from_point((lat, lon), dist=int(radio_km * 1000),
+                                            network_type="drive")
+                else:
+                    G = ox.graph_from_place(ciudad, network_type="drive")
                 return G, ox.project_graph(G)  # UTM automático
             except Exception as e:
                 ultimo = e
@@ -146,18 +150,18 @@ def candidatos(via):
     return [(eje, num), ("V", num), ("H", num)]
 
 @st.cache_resource(show_spinner=False)
-def features_red(ciudad):
+def features_red(ciudad, radio_km=0):
     """Intersecciones + índices de vía + betweenness APROXIMADA, con caché en disco.
-    Optimizaciones: (1) betweenness por muestreo de pivotes (k) -> mucho más rápida
-    con ordenamiento casi idéntico; (2) persistencia en disco -> reinicios instantáneos."""
+    El nº de pivotes de la betweenness se adapta al tamaño del grafo para no
+    disparar el tiempo en ciudades grandes."""
     import osmnx as ox, networkx as nx
 
-    ruta = os.path.join(CACHE_DIR, re.sub(r"\W+", "_", ciudad) + ".pkl")
+    ruta = os.path.join(CACHE_DIR, re.sub(r"\W+", "_", f"{ciudad}_r{radio_km}") + ".pkl")
     if os.path.exists(ruta):                 # ya se calculó antes -> lectura instantánea
         with open(ruta, "rb") as f:
             return pickle.load(f)
 
-    G, G_proj = carga_red(ciudad)
+    G, G_proj = carga_red(ciudad, radio_km)
     nodos, aristas = ox.graph_to_gdfs(G_proj)
     via_a_nodos, via_a_aristas = {}, {}
     for (u, v, k), row in aristas.iterrows():
@@ -172,7 +176,9 @@ def features_red(ciudad):
     inter = nodos[nodos["street_count"] >= 3].copy()
 
     G_u = ox.convert.to_undirected(G_proj)
-    k = min(500, G_u.number_of_nodes())      # muestreo: 500 pivotes (exacta si es menor)
+    n = G_u.number_of_nodes()
+    # pivotes adaptativos: grafos grandes usan menos pivotes (ranking casi igual)
+    k = 100 if n > 12000 else 250 if n > 5000 else min(500, n)
     btw = nx.betweenness_centrality(G_u, k=k, weight="length", seed=42)
     inter["grado"] = inter["street_count"]
     inter["betweenness"] = pd.Series(btw).reindex(inter.index).fillna(0)
@@ -193,18 +199,24 @@ CATEGORIAS_POI = {
 }
 
 @st.cache_resource(show_spinner=False)
-def features_entorno(ciudad):
-    """Distancias y densidades de POIs por intersección. Cacheado por ciudad."""
+def features_entorno(ciudad, radio_km=0):
+    """Distancias y densidades de POIs por intersección. Si hay radio, los POIs
+    también se descargan por radio (coherente y más rápido)."""
     import osmnx as ox
     from scipy.spatial import cKDTree
     from sklearn.cluster import DBSCAN
-    _, G_proj, nodos, _, inter, _, _ = features_red(ciudad)
+    _, G_proj, nodos, _, inter, _, _ = features_red(ciudad, radio_km)
+    centro_ll = ox.geocode(ciudad) if (radio_km and radio_km > 0) else None
     xy = np.c_[inter.geometry.x, inter.geometry.y]
     total = np.zeros(len(inter))
     out = {}
     for cat, tags in CATEGORIAS_POI.items():
         try:
-            g = ox.features_from_place(ciudad, tags=tags).to_crs(G_proj.graph["crs"])
+            if centro_ll:
+                g = ox.features_from_point(centro_ll, tags=tags,
+                                           dist=int(radio_km * 1000)).to_crs(G_proj.graph["crs"])
+            else:
+                g = ox.features_from_place(ciudad, tags=tags).to_crs(G_proj.graph["crs"])
             pts = np.c_[g.geometry.centroid.x, g.geometry.centroid.y]
             lab = DBSCAN(eps=35, min_samples=1).fit_predict(pts)
             pts = np.array([pts[lab == l].mean(axis=0) for l in np.unique(lab)])
@@ -273,6 +285,14 @@ with st.sidebar:
         ciudad = st.text_input("Escribe la ciudad como en OpenStreetMap", "Acacías, Meta, Colombia")
     else:
         ciudad = sel
+
+    # --- área a analizar (clave para ciudades grandes como Medellín) ---
+    area = st.radio("Área a analizar", ["Centro urbano (rápido)", "Municipio completo (lento)"],
+                    help="En ciudades grandes, analiza solo el centro por radio: mucho más rápido.")
+    if area.startswith("Centro"):
+        radio_km = st.slider("Radio del centro (km)", 2, 15, 6)
+    else:
+        radio_km = 0
 
     modelo_sel = st.selectbox("Modelo", ["Regresión Logística (interpretable)", "Random Forest"])
     bloque_km = st.slider("Tamaño de bloque espacial (km)", 0.5, 3.0, 1.0, 0.5,
@@ -446,8 +466,8 @@ if ejecutar:
 
     try:
         with st.spinner(f"Descargando red vial y calculando centralidad de «{ciudad}»… (puede tardar)"):
-            G, G_proj, nodos, aristas, inter, via_a_nodos, via_a_aristas = features_red(ciudad)
-            ent = features_entorno(ciudad)
+            G, G_proj, nodos, aristas, inter, via_a_nodos, via_a_aristas = features_red(ciudad, radio_km)
+            ent = features_entorno(ciudad, radio_km)
     except Exception as e:
         st.error(f"No se pudo construir la red de «{ciudad}». Verifica el nombre en OSM o reintenta "
                  f"(Overpass puede estar saturado). Detalle: {e}"); st.stop()
@@ -684,4 +704,5 @@ salida = inter.drop(columns="geometry").copy()
 st.sidebar.download_button("⬇️ Descargar intersecciones con predicciones (CSV)",
                            salida.to_csv().encode("utf-8"),
                            file_name="intersecciones_predicciones.csv", mime="text/csv")
+
 
