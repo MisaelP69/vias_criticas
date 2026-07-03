@@ -36,25 +36,37 @@ CIUDADES = [
 # ------------------------------------------------------------
 # Consultas a OpenStreetMap (cacheadas por ciudad)
 # ------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def osm_barrios(ciudad):
-    import osmnx as ox
-    try:
-        g = ox.features_from_place(ciudad, tags={"place": ["suburb", "neighbourhood", "quarter", "borough"]})
-        nombres = sorted({str(n).upper() for n in g.get("name", pd.Series(dtype=str)).dropna()})
-        return nombres
-    except Exception:
-        return []
+def _consulta_osm(ciudad, tags, radio_km=8):
+    """Consulta OSM en un círculo de radio_km alrededor del centro (rápido y
+    confiable en ciudades grandes), con reintentos y servidores espejo."""
+    import osmnx as ox, time
+    ox.settings.use_cache = True
+    for attr, val in [("requests_timeout", 180), ("timeout", 180)]:
+        try: setattr(ox.settings, attr, val)
+        except Exception: pass
+    endpoints = ["https://overpass-api.de/api",
+                 "https://overpass.kumi.systems/api",
+                 "https://maps.mail.ru/osm/tools/overpass/api"]
+    for ep in endpoints:
+        for attr in ("overpass_url", "overpass_endpoint"):
+            try: setattr(ox.settings, attr, ep)
+            except Exception: pass
+        try:
+            lat, lon = ox.geocode(ciudad)                        # centro de la ciudad
+            g = ox.features_from_point((lat, lon), tags=tags, dist=int(radio_km * 1000))
+            return sorted({str(n).upper() for n in g.get("name", pd.Series(dtype=str)).dropna()})
+        except Exception:
+            time.sleep(2)
+    return []
 
 @st.cache_data(show_spinner=False)
-def osm_vias(ciudad):
-    import osmnx as ox
-    try:
-        g = ox.features_from_place(ciudad, tags={"highway": ["motorway", "trunk", "primary", "secondary"]})
-        nombres = sorted({str(n).upper() for n in g.get("name", pd.Series(dtype=str)).dropna()})
-        return nombres
-    except Exception:
-        return []
+def osm_barrios(ciudad, radio_km=8):
+    return _consulta_osm(ciudad, {"place": ["suburb", "neighbourhood", "quarter", "borough"]}, radio_km)
+
+@st.cache_data(show_spinner=False)
+def osm_vias(ciudad, radio_km=8):
+    # solo vías mayores (motorway/trunk/primary): más liviano que incluir secundarias
+    return _consulta_osm(ciudad, {"highway": ["motorway", "trunk", "primary"]}, radio_km)
 
 # ------------------------------------------------------------
 # CONTROLES
@@ -68,11 +80,14 @@ with st.sidebar:
     else:
         ciudad = sel
 
+    radio_osm = st.slider("Radio de consulta desde el centro (km)", 2, 15, 8,
+                          help="Consulta barrios y vías solo alrededor del centro. "
+                               "Menor radio = más rápido en ciudades grandes.")
     cargar = st.button("🔎 Consultar barrios y vías de la ciudad")
     if cargar:
-        with st.spinner(f"Consultando OpenStreetMap para «{ciudad}»…"):
-            st.session_state["barrios_ciudad"] = osm_barrios(ciudad)
-            st.session_state["vias_ciudad"] = osm_vias(ciudad)
+        with st.spinner(f"Consultando OpenStreetMap para «{ciudad}» (radio {radio_osm} km)…"):
+            st.session_state["barrios_ciudad"] = osm_barrios(ciudad, radio_osm)
+            st.session_state["vias_ciudad"] = osm_vias(ciudad, radio_osm)
             st.session_state["ciudad_cargada"] = ciudad
 
     barrios_disp = st.session_state.get("barrios_ciudad", [])
@@ -245,3 +260,4 @@ try:
     st.page_link("app.py", label="➡️ Ir a la página de Análisis", icon="📊")
 except Exception:
     st.caption("Abre la página principal desde el menú de la barra lateral.")
+
