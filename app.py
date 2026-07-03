@@ -105,6 +105,12 @@ def limpia_csv(df):
 # ------------------------------------------------------------
 # Descarga de red y features (cacheadas: es la parte lenta)
 # ------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def _centro(ciudad):
+    """Geocodifica la ciudad a (lat, lon) una sola vez (cacheado)."""
+    import osmnx as ox
+    return ox.geocode(ciudad)
+
 @st.cache_resource(show_spinner=False)
 def carga_red(ciudad, radio_km=0):
     """Descarga y proyecta el grafo de OSM. Si radio_km>0, descarga solo un
@@ -127,7 +133,7 @@ def carga_red(ciudad, radio_km=0):
         for _ in range(2):                     # 2 intentos por servidor
             try:
                 if radio_km and radio_km > 0:
-                    lat, lon = ox.geocode(ciudad)
+                    lat, lon = _centro(ciudad)
                     G = ox.graph_from_point((lat, lon), dist=int(radio_km * 1000),
                                             network_type="drive")
                 else:
@@ -198,41 +204,69 @@ CATEGORIAS_POI = {
     "recreacion":  {"leisure": True, "amenity": ["place_of_worship"]},
 }
 
+def _mask_categoria(g, tags):
+    """Máscara booleana de las filas de g que cumplen las etiquetas de la categoría."""
+    m = np.zeros(len(g), dtype=bool)
+    for key, val in tags.items():
+        if key not in g.columns:
+            continue
+        m = m | (g[key].notna() if val is True else g[key].isin(val))
+    return m
+
 @st.cache_resource(show_spinner=False)
 def features_entorno(ciudad, radio_km=0):
-    """Distancias y densidades de POIs por intersección. Si hay radio, los POIs
-    también se descargan por radio (coherente y más rápido)."""
+    """Distancias y densidades de POIs por intersección.
+    OPTIMIZADO: una sola consulta a OSM con TODAS las etiquetas (antes eran 7)
+    y caché en disco para no recalcular tras reinicios."""
     import osmnx as ox
     from scipy.spatial import cKDTree
     from sklearn.cluster import DBSCAN
+
+    ruta = os.path.join(CACHE_DIR, re.sub(r"\W+", "_", f"ent_{ciudad}_r{radio_km}") + ".pkl")
+    if os.path.exists(ruta):
+        with open(ruta, "rb") as f:
+            return pickle.load(f)
+
     _, G_proj, nodos, _, inter, _, _ = features_red(ciudad, radio_km)
-    centro_ll = ox.geocode(ciudad) if (radio_km and radio_km > 0) else None
+    crs = G_proj.graph["crs"]
     xy = np.c_[inter.geometry.x, inter.geometry.y]
+
+    # UNA sola consulta con la unión de todas las etiquetas de interés
+    combinado = {"amenity": sorted({a for t in CATEGORIAS_POI.values()
+                                    for a in t.get("amenity", [])}),
+                 "shop": True, "leisure": True, "highway": ["bus_stop"]}
+    try:
+        if radio_km and radio_km > 0:
+            g_all = ox.features_from_point(_centro(ciudad), tags=combinado,
+                                           dist=int(radio_km * 1000)).to_crs(crs)
+        else:
+            g_all = ox.features_from_place(ciudad, tags=combinado).to_crs(crs)
+    except Exception:
+        g_all = None
+
     total = np.zeros(len(inter))
     out = {}
     for cat, tags in CATEGORIAS_POI.items():
-        try:
-            if centro_ll:
-                g = ox.features_from_point(centro_ll, tags=tags,
-                                           dist=int(radio_km * 1000)).to_crs(G_proj.graph["crs"])
-            else:
-                g = ox.features_from_place(ciudad, tags=tags).to_crs(G_proj.graph["crs"])
-            pts = np.c_[g.geometry.centroid.x, g.geometry.centroid.y]
-            lab = DBSCAN(eps=35, min_samples=1).fit_predict(pts)
-            pts = np.array([pts[lab == l].mean(axis=0) for l in np.unique(lab)])
-        except Exception:
-            pts = np.empty((0, 2))
+        pts = np.empty((0, 2))
+        if g_all is not None and len(g_all):
+            sub = g_all[_mask_categoria(g_all, tags)]
+            if len(sub):
+                p = np.c_[sub.geometry.centroid.x, sub.geometry.centroid.y]
+                lab = DBSCAN(eps=35, min_samples=1).fit_predict(p)   # dedup duplicados de OSM
+                pts = np.array([p[lab == l].mean(axis=0) for l in np.unique(lab)])
         if len(pts) == 0:
             out[f"dist_{cat}"], out[f"dens_{cat}_300m"] = np.full(len(inter), 3000.0), np.zeros(len(inter))
             continue
         t = cKDTree(pts)
         out[f"dist_{cat}"] = np.minimum(t.query(xy)[0], 3000)
-        dens = np.array([len(t.query_ball_point(p, 300)) for p in xy])
-        out[f"dens_{cat}_300m"] = dens
-        total += dens
+        out[f"dens_{cat}_300m"] = np.array([len(t.query_ball_point(p, 300)) for p in xy])
+        total += out[f"dens_{cat}_300m"]
     out["generadores_300m"] = total
     out["dist_centro"] = np.linalg.norm(xy - xy.mean(axis=0), axis=1)
-    return pd.DataFrame(out, index=inter.index)
+    res = pd.DataFrame(out, index=inter.index)
+    with open(ruta, "wb") as f:
+        pickle.dump(res, f)
+    return res
 
 def localiza(v1, v2, via_a_nodos, sc):
     # tras df.apply, los None se vuelven NaN (float); exigir tuplas reales
