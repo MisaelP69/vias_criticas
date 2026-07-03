@@ -107,13 +107,32 @@ def limpia_csv(df):
 # ------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def carga_red(ciudad):
-    """Descarga y proyecta el grafo de OSM. Cacheado por ciudad."""
-    import osmnx as ox
+    """Descarga y proyecta el grafo de OSM. Reintenta con servidores Overpass
+    alternativos (espejos) si el principal rechaza la conexión o se satura.
+    Cacheado por ciudad."""
+    import osmnx as ox, time
     ox.settings.use_cache = True     # OSMnx cachea en disco la descarga de Overpass
-    ox.settings.timeout = 180
-    G = ox.graph_from_place(ciudad, network_type="drive")
-    G_proj = ox.project_graph(G)                       # UTM automático
-    return G, G_proj
+    for attr, val in [("requests_timeout", 300), ("timeout", 300)]:
+        try: setattr(ox.settings, attr, val)   # el nombre varía según versión de OSMnx
+        except Exception: pass
+
+    # servidores Overpass alternativos: si el primero falla, prueba los espejos
+    endpoints = ["https://overpass-api.de/api",
+                 "https://overpass.kumi.systems/api",
+                 "https://maps.mail.ru/osm/tools/overpass/api"]
+    ultimo = None
+    for ep in endpoints:
+        for attr in ("overpass_url", "overpass_endpoint"):
+            try: setattr(ox.settings, attr, ep)
+            except Exception: pass
+        for _ in range(2):                     # 2 intentos por servidor
+            try:
+                G = ox.graph_from_place(ciudad, network_type="drive")
+                return G, ox.project_graph(G)  # UTM automático
+            except Exception as e:
+                ultimo = e
+                time.sleep(3)
+    raise ultimo
 
 def clave_osm(nombre):
     m = TOKEN.match(norm(nombre))
@@ -665,3 +684,4 @@ salida = inter.drop(columns="geometry").copy()
 st.sidebar.download_button("⬇️ Descargar intersecciones con predicciones (CSV)",
                            salida.to_csv().encode("utf-8"),
                            file_name="intersecciones_predicciones.csv", mime="text/csv")
+
