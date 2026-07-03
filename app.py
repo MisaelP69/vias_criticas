@@ -297,6 +297,10 @@ with st.sidebar:
     modelo_sel = st.selectbox("Modelo", ["Regresión Logística (interpretable)", "Random Forest"])
     bloque_km = st.slider("Tamaño de bloque espacial (km)", 0.5, 3.0, 1.0, 0.5,
                           help="Grupo de la validación cruzada espacial. Mayor = más estricto.")
+    limitar_area = st.checkbox("Limitar análisis al área con datos", value=True,
+                               help="Descarta intersecciones lejanas a cualquier accidente. Evita "
+                                    "prioridades altas en zonas rurales sin siniestralidad.")
+    buffer_m = st.slider("Radio de influencia de los datos (m)", 300, 3000, 1000, 100) if limitar_area else 0
     n_folds = st.slider("Número de pliegues (folds)", 3, 5, 5)
     ejecutar = st.button("▶️ Ejecutar análisis", type="primary")
 
@@ -495,6 +499,15 @@ if ejecutar:
                     muertes=("muertes", "sum"), heridos=("heridos", "sum")))
         inter = inter.join(agg).fillna({"n_acc": 0, "severidad": 0, "muertes": 0, "heridos": 0})
         inter["y"] = (inter["n_acc"] > 0).astype(int)
+
+        # limitar a intersecciones cercanas a algún accidente (las con siniestro
+        # tienen distancia 0 y siempre se conservan). Elimina las intersecciones
+        # rurales lejanas donde el modelo marcaría prioridad sin datos que lo respalden.
+        if limitar_area and len(loc):
+            acc_xy = np.c_[nodos.loc[loc["nodo"]].geometry.x, nodos.loc[loc["nodo"]].geometry.y]
+            dnear = cKDTree(acc_xy).query(np.c_[inter.geometry.x, inter.geometry.y])[0]
+            inter = inter[dnear <= buffer_m].copy()
+
         inter["bloque"] = (np.floor(inter.geometry.x / (bloque_km*1000)).astype(int).astype(str) + "_"
                            + np.floor(inter.geometry.y / (bloque_km*1000)).astype(int).astype(str))
 
@@ -704,5 +717,6 @@ salida = inter.drop(columns="geometry").copy()
 st.sidebar.download_button("⬇️ Descargar intersecciones con predicciones (CSV)",
                            salida.to_csv().encode("utf-8"),
                            file_name="intersecciones_predicciones.csv", mime="text/csv")
+
 
 
